@@ -5,6 +5,7 @@
 # Revision      : 1.0
 # Last updated  : Feb/18/2022
 # Purpose       : Enables SNMP linkUp and LinkDown for uplink ports (MLT member ports) and disables it for edge ports.
+#                 The scripts looks for active MLT ports with 'Uplink Core' as port name.
 #
 ################################################################
 from device import api
