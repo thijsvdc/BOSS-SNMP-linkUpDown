@@ -107,6 +107,13 @@ __version__ = '2.0'
 #        scope = device
 #    )
 #    @VariableFieldLabel (
+#        description = "Subnetmask CIDR",
+#        type = string,
+#        required = yes,
+#        name = "userInput_subnet",
+#        scope = device
+#    )
+#    @VariableFieldLabel (
 #        description = "New mgmt VLAN ID",
 #        type = string,
 #        required = yes,
@@ -827,13 +834,14 @@ CLI_Dict = {
                                           sys-name {0}
                                        exit
                                        ''',
-        'change_mgmt_vlan'           : # newVlanID, newVlanISID, newIp, currentIpMask, newVlanDGW
+        'change_mgmt_vlan'           : # newVlanID, newVlanISID, newIp, subnet, newVlanDGW
                                        '''
                                        no mgmt vlan
+                                       no mgmt dhcp-client
                                        vlan create {0} name NET-Mgmt type port 0
                                        vlan i-sid {0} {1}
                                        mgmt vlan {0}
-                                          ip address {2} {3}
+                                          ip address {2}/{3}
                                           ip route 0.0.0.0/0 next-hop {4}
                                           enable
                                        exit
@@ -1061,9 +1069,11 @@ def main():
     newVlanISID         = emc_vars["userInput_isid"].strip()
     newVlanDGW          = emc_vars["userInput_dgw"].strip()
     snmpLoc             = emc_vars["userInput_snmpLoc"].strip()
-
+    subnet              = emc_vars["userInput_subnet"].strip()
+    
     print "Information provided by User:"
     print " - New VLAN IP = {}".format(newIp)
+    print " - Subnetmask = {}".format(subnet)
     print " - New VLAN ID = {}".format(newVlanID)
     print " - New VLAN I-SID = {}".format(newVlanISID)
     print " - New VLAN Gateway = {}".format(newVlanDGW)
@@ -1122,9 +1132,9 @@ def main():
     if subnetMask(currentIp, currentIpMask)[0] == subnetMask(newIp, currentIpMask)[0]:
         exitError("New IP {} seems to be in same subnet of existing IP {}".format(newIp, currentIp))
 
-    # Verify whether mgmt clip is already set
-    mgmtIfList = sendCLI_showRegex(CLI_Dict[Family]['list_mgmt_interfaces'])
-    mgmtIpDict = sendCLI_showRegex(CLI_Dict[Family]['list_mgmt_ips'])
+#    # Verify whether mgmt clip is already set
+#    mgmtIfList = sendCLI_showRegex(CLI_Dict[Family]['list_mgmt_interfaces'])
+#    mgmtIpDict = sendCLI_showRegex(CLI_Dict[Family]['list_mgmt_ips'])
 
     # Enter Config context
     sendCLI_configCommand(CLI_Dict[Family]['config_context'])
@@ -1150,21 +1160,9 @@ def main():
 #        print "Waiting up to 10secs for new CLIP Mgmt IP to reply to ping"
     
     # Send commands to script to change the mgmt VLAN
-    warpBuffer_add(CLI_Dict[Family]['change_mgmt_vlan'].format(newVlanID, newVlanISID, newIp, currentIpMask, newVlanDGW))
+    warpBuffer_add(CLI_Dict[Family]['change_mgmt_vlan'].format(newVlanID, newVlanISID, newIp, subnet, newVlanDGW))
+#    rollbackCommand(CLI_Dict[Family]['revert_mgmt_vlan'].format(currentIP)) --> need to get current gw, id, id,...
 
-    if not Sanity:
-        time.sleep(10)
-        retries = 0
-        response = None
-        while not retries > 25:
-            response = os.system("ping -c 1 " + newIp)
-            if response == 0: # Response from ping
-                break
-            retries += 1
-            print " - {} timeout".format(retries)
-        if response == 1: # No response from ping
-            abortError("ping {}".format(newIp), "Newly configured VLAN IP {} not reachable by XMC; rolling back changes".format(newIp))
-        print " - reply from {}".format(newIp)
 
     # Queue change of sys-name
     if newSysName:
@@ -1178,6 +1176,22 @@ def main():
     warpBuffer_execute(waitForPrompt=False)
     addXmcSyslogEvent('info', "Changed IP address to {}".format(newIp), currentIp)
 
+    print "Waiting up to 10secs for new Mgmt IP to reply to ping"
+    
+    if not Sanity:
+        time.sleep(10)
+        retries = 0
+        response = None
+        while not retries > 10:
+            response = os.system("ping -c 1 " + newIp)
+            if response == 0: # Response from ping
+                break
+            retries += 1
+            print " - {} timeout".format(retries)
+        if response == 1: # No response from ping
+            abortError("ping {}".format(newIp), "Newly configured VLAN IP {} not reachable by XMC; rolling back changes".format(newIp))
+        print " - reply from {}".format(newIp)
+    
     # Close the connection
     if not Sanity:
         emc_cli.close()
