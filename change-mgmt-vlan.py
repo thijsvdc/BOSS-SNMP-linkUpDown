@@ -18,12 +18,13 @@ SCRIPTS.
 
 # --> Insert here script description, version and metadata <--
 
-##########################################################
-# XMC Script: Move Switch to CLIP mgmt IP                #
-# Written by Ludovico Stevens, TME Extreme Networks      #
-##########################################################
+##########################################################################################
+# XMC Script: Change mgmt VLAN                                                           #
+# Original script written by Ludovico Stevens, TME Extreme Networks                      #
+# Adapted by Thijs Vandecasteele, Senior Network Engineer Orange Cyberdefense Belgium    #
+##########################################################################################
 
-__version__ = '1.9'
+__version__ = '2.0'
 
 # 1.0   - Initial
 # 1.1   - Some extra IP validation checks
@@ -46,6 +47,8 @@ __version__ = '1.9'
 # 1.8   - Updated with latest version of function libraries
 #       - Able to re-try device addition into XIQ-SE; as sometimes the addition seems to fail
 # 1.9   - Above change was not working; not easy to reproduce and thus test...
+# --- end of original script by Ludovico
+# 2.0   - Initial changes to convert base script from CLIP mgmt to VLAN mgmt
 
 
 '''
@@ -95,23 +98,7 @@ __version__ = '1.9'
 # , = &#44;
 # < = &lt;
 # > = &gt;
-#@SectionStart (description = "New switch mgmt circuitless IP &#40;mask will be 32bits&#41;")
-#    @VariableFieldLabel (
-#        description = "Associated VRF name &#40;default is GRT&#41;",
-#        type = string,
-#        required = no,
-#        name = "userInput_vrf",
-#        value = "GlobalRouter",
-#    )
-#    @VariableFieldLabel (
-#        description = "Existing mgmt VLAN IP",
-#        type = string,
-#        required = no,
-#        readOnly = no,
-#        validValues = [Delete, Do NOT delete],
-#        value = "Delete"
-#        name = "userInput_mgmtVlanIp",
-#    )
+#@SectionStart (description = "Change accordingly")
 #    @VariableFieldLabel (
 #        description = "New mgmt VLAN IP",
 #        type = string,
@@ -840,6 +827,21 @@ CLI_Dict = {
                                           sys-name {0}
                                        exit
                                        ''',
+        'change_mgmt_vlan'           : # newVlanID, newVlanISID, newIp, currentIpMask, newVlanDGW
+                                       '''
+                                       no mgmt vlan
+                                       vlan create {0} name NET-Mgmt type port 0
+                                       vlan i-sid {0} {1}
+                                       mgmt vlan {0}
+                                          ip address {2} {3}
+                                          ip route 0.0.0.0/0 next-hop {4}
+                                          enable
+                                       exit
+                                       ''',
+        'set_snmp_loc'               : # snmpLoc
+                                       '''
+                                       snmp-server location "{0}"
+                                       ''',
     },
 }
 
@@ -1053,16 +1055,21 @@ def main():
     #
     setFamily() # Sets global Family variable
     currentIp           = emc_vars["deviceIP"]
-    newVrf              = emc_vars["userInput_vrf"].strip()
-    mgmtVlanIpAction    = emc_vars["userInput_mgmtVlanIp"].lower()
     newIp               = emc_vars["userInput_ip"].strip()
     newSysName          = emc_vars["userInput_sysname"].strip()
+    newVlanID           = emc_vars["userInput_vid"].strip()
+    newVlanISID         = emc_vars["userInput_isid"].strip()
+    newVlanDGW          = emc_vars["userInput_dgw"].strip()
+    snmpLoc             = emc_vars["userInput_snmpLoc"].strip()
 
     print "Information provided by User:"
-    print " - New CLIP VRF = {}".format(newVrf)
-    print " - Existing Mgmt VLAN IP action = {}".format(mgmtVlanIpAction)
-    print " - New CLIP IP = {}".format(newIp)
+    print " - New VLAN IP = {}".format(newIp)
+    print " - New VLAN ID = {}".format(newVlanID)
+    print " - New VLAN I-SID = {}".format(newVlanISID)
+    print " - New VLAN Gateway = {}".format(newVlanDGW)
     print " - New System Name = {}".format(newSysName)
+    print " - SNMP Location = {}".format(snmpLoc)
+    
 
     vossVersion = emc_vars["deviceSoftwareVer"]
 
@@ -1083,10 +1090,6 @@ def main():
     # Sys-name validation
     if re.search(r'\s', newSysName):
         exitError('System Name provided must not contain any spaces: "{}"'.format(newSysName))
-
-    # VRF validation
-    if not newVrf:
-        newVrf = 'GlobalRouter'
 
     # Check if given IP is already in XMC
     checkNewIpInXmc = nbiQuery(NBI_Query['checkSwitchXmcDb'], IP=newIp)
@@ -1119,32 +1122,6 @@ def main():
     if subnetMask(currentIp, currentIpMask)[0] == subnetMask(newIp, currentIpMask)[0]:
         exitError("New IP {} seems to be in same subnet of existing IP {}".format(newIp, currentIp))
 
-    # Check if node is a DVR Leaf
-    dvrNodeType = sendCLI_showRegex(CLI_Dict[Family]['get_dvr_type'], 'dvrNodeType', True, "No DVR support on this switch")
-
-    if dvrNodeType == 'leaf': # Processing diverges based on DVR Leaf or regular BEB
-        # Verify the VRF is GRT
-        if newVrf != 'GlobalRouter':
-            exitError("Switch is a DVR Leaf and mgmt clip can only be applied on GlobalRouter VRF")
-
-    else: # Regular BEB
-        # Verify VRF existence
-        if newVrf != 'GlobalRouter':
-            vrfExists = sendCLI_showRegex(CLI_Dict[Family]['check_vrf_exists'].format(newVrf))
-            if not vrfExists:
-                exitError("VRF {} does not exist on switch; cannot create a mgmt clip for non-existent VRF".format(newVrf))
-
-        # For a VRF other than GRT, we also need to check that ipvpn is enabled
-        if newVrf != 'GlobalRouter':
-            vrfL3vsnExists = sendCLI_showRegex(CLI_Dict[Family]['check_vrf_l3vsn'].format(newVrf))
-            if not vrfL3vsnExists:
-                exitError("VRF {} must be a L3VSN (ipvpn enabled) before assigning a mgmt clip to it".format(newVrf))
-
-        # Verify if IP Shortcuts is enabled (GRT alone, if it wasn't and a VRF was specified, we would have errored above)
-        spbmGlobalDict = extractSpbmGlobal()
-        if not spbmGlobalDict['IP'] == 'enable':
-            print "IP Shortcuts (spbm ip enable) is not enabled and will be enabled by this script (but no ISIS ip-source-address will be set)"
-
     # Verify whether mgmt clip is already set
     mgmtIfList = sendCLI_showRegex(CLI_Dict[Family]['list_mgmt_interfaces'])
     mgmtIpDict = sendCLI_showRegex(CLI_Dict[Family]['list_mgmt_ips'])
@@ -1152,42 +1129,50 @@ def main():
     # Enter Config context
     sendCLI_configCommand(CLI_Dict[Family]['config_context'])
 
-    if 'CLIP' in mgmtIfList: # Here a mgmt clip already exists, and we are trying to change it
-        # Queue delete of existing mgmt clip
-        warpBuffer_add(CLI_Dict[Family]['delete_mgmt_clip'])
+#    if 'CLIP' in mgmtIfList: # Here a mgmt clip already exists, and we are trying to change it
+#        # Queue delete of existing mgmt clip
+#        warpBuffer_add(CLI_Dict[Family]['delete_mgmt_clip'])
+#
+#        # Queue creation of new mgmt clip
+#        warpBuffer_add(CLI_Dict[Family]['create_mgmt_clip'].format(newVrf, newIp))
+#
+#    else: # Here no mgmt clip exists, so we can take a safer approach...
+#        # For GRT + regular BEB + IP Shortcuts not enabled, we enable IP Shortcuts
+#        if (not dvrNodeType == 'leaf' and not spbmGlobalDict['IP'] == 'enable'):
+#            sendCLI_configChain(CLI_Dict[Family]['enable_ip_shortcuts'])
+#            rollbackCommand(CLI_Dict[Family]['disable_ip_shortcuts'])
+#
+#        # Go ahead and create the new mgmt clip
+#        sendCLI_configChain(CLI_Dict[Family]['create_mgmt_clip'].format(newVrf, newIp))
+#        rollbackCommand(CLI_Dict[Family]['delete_mgmt_clip'])
+#
+#        # Now check if the IP is reachable by XMC
+#        print "Waiting up to 10secs for new CLIP Mgmt IP to reply to ping"
+    
+    # Send commands to script to change the mgmt VLAN
+    warpBuffer_add(CLI_Dict[Family]['change_mgmt_vlan'].format(newVlanID, newVlanISID, newIp, currentIpMask, newVlanDGW))
 
-        # Queue creation of new mgmt clip
-        warpBuffer_add(CLI_Dict[Family]['create_mgmt_clip'].format(newVrf, newIp))
-
-    else: # Here no mgmt clip exists, so we can take a safer approach...
-        # For GRT + regular BEB + IP Shortcuts not enabled, we enable IP Shortcuts
-        if (not dvrNodeType == 'leaf' and not spbmGlobalDict['IP'] == 'enable'):
-            sendCLI_configChain(CLI_Dict[Family]['enable_ip_shortcuts'])
-            rollbackCommand(CLI_Dict[Family]['disable_ip_shortcuts'])
-
-        # Go ahead and create the new mgmt clip
-        sendCLI_configChain(CLI_Dict[Family]['create_mgmt_clip'].format(newVrf, newIp))
-        rollbackCommand(CLI_Dict[Family]['delete_mgmt_clip'])
-
-        # Now check if the IP is reachable by XMC
-        print "Waiting up to 50secs for new CLIP Mgmt IP to reply to ping"
-        if not Sanity:
-            time.sleep(25)
-            retries = 0
-            response = None
-            while not retries > 25:
-                response = os.system("ping -c 1 " + newIp)
-                if response == 0: # Response from ping
-                    break
-                retries += 1
-                print " - {} timeout".format(retries)
-            if response == 1: # No response from ping
-                abortError("ping {}".format(newIp), "Newly configured clip IP {} not reachable by XMC; rolling back changes".format(newIp))
-            print " - reply from {}".format(newIp)
+    if not Sanity:
+        time.sleep(10)
+        retries = 0
+        response = None
+        while not retries > 25:
+            response = os.system("ping -c 1 " + newIp)
+            if response == 0: # Response from ping
+                break
+            retries += 1
+            print " - {} timeout".format(retries)
+        if response == 1: # No response from ping
+            abortError("ping {}".format(newIp), "Newly configured VLAN IP {} not reachable by XMC; rolling back changes".format(newIp))
+        print " - reply from {}".format(newIp)
 
     # Queue change of sys-name
     if newSysName:
         warpBuffer_add(CLI_Dict[Family]['change_sys_name'].format(newSysName))
+
+    # Queue change of SNMP location
+    if snmpLoc:
+        warpBuffer_add(CLI_Dict[Family]['set_snmp_loc'].format(snmpLoc))
 
     # Execute queued buffer
     warpBuffer_execute(waitForPrompt=False)
@@ -1212,7 +1197,7 @@ def main():
     # Or we get None
     if switchNacExists:
         if not nbiMutation(NBI_Query['accessControlDeleteSwitch'], IP=currentIp): # Delete the switch from AccessControl
-            exitError("Failed to delete existing switch IP '{}' in NAC Engine Group".format(ipAddress))
+            exitError("Failed to delete existing switch IP '{}' in NAC Engine Group".format(currentIp))
         addXmcSyslogEvent('info', "Deleted device from XMC Control", currentIp)
         print "Deleted device {} from XMC NAC engine".format(currentIp)
 
@@ -1266,24 +1251,12 @@ def main():
         print
 
     # Try and re-open session against the new CLIP IP
-    print "Device is re-added to XMC; attempting to re-connect on new CLIP IP"
+    print "Device is re-added to XMC; attempting to re-connect on new VLAN IP"
     if not Sanity:
         emc_cli.setIpAddress(newIp)
 
     # Enter privExec
     sendCLI_showCommand(CLI_Dict[Family]['enable_context'])
-
-    # If we wanted to delete the existing VLAN IP
-    if 'VLAN' in mgmtIfList and 'vlan' in mgmtIpDict and mgmtVlanIpAction == 'delete':
-        # Enter Config context
-        sendCLI_configCommand(CLI_Dict[Family]['config_context'])
-        # Delete of existing mgmt vlan
-        if dvrNodeType == 'leaf':
-            sendCLI_configChain(CLI_Dict[Family]['delete_mgmt_vlan_dvr_leaf'].format(mgmtIpDict['vlan']))
-        else:
-            sendCLI_configChain(CLI_Dict[Family]['delete_mgmt_vlan'])
-        # Exit Config context
-        sendCLI_configCommand(CLI_Dict[Family]['end_config'])
 
     # Save the config
     vossSaveConfigRetry(waitTime=10, retries=3)
